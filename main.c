@@ -21,14 +21,24 @@ int extract_elo(char *line) {
 bool is_within_elo_range(char accumulator[32][32768], int low_elo, int high_elo) {
     int white_elo = 0;
     int black_elo = 0;
-    for (int i = 0; i < 32; i++) {
+
+    int early_exit = 0;
+
+    for (int i = 0; i < 32; i++) { // Iterate over the entire accumulator to see if we have WhiteElo or BlackElo.
         if (strstr(accumulator[i], "WhiteElo")) {
             white_elo = extract_elo(accumulator[i]);
+            early_exit++;
         } else if (strstr(accumulator[i], "BlackElo")) {
             black_elo = extract_elo(accumulator[i]);
+            early_exit++;
+        }
+
+        if (early_exit >= 2) { // If we have parsed 2 elo's, we shouldn't ever have more!
+            return (white_elo >= low_elo && white_elo <= high_elo && black_elo >= low_elo && black_elo <= high_elo);
         }
     }
-    return (white_elo >= low_elo && white_elo <= high_elo && black_elo >= low_elo && black_elo <= high_elo);
+    printf("WARNING: RECORD REACHED END WITHOUT ELO");
+    return false;
 }
 
 int main(int argc, char *argv[]) {
@@ -60,30 +70,29 @@ int main(int argc, char *argv[]) {
 
     bool first_newline = true;
     while ((linelength = getline(&line, &len, fp)) != -1) {  // Read through entire file
-
-        if (linelength == 1 && first_newline == false) {  // We got the end of a record now
+        if (linelength == 1 && first_newline == false) {  // We are at the end of a record now
             records_parsed++;
 
             // Check if the record is within the target Elo range
             if (is_within_elo_range(accumulator, low_elo, high_elo)) {
-                printf("\n");  // Only print newline if a match is found
+                printf("\n");  // Only print newline if a match is found, this ensures we have that extra break between pgn data and pgn moves
 
                 // Print accumulator
                 for (int i = 0; i < accumulator_index; i++) {
                     printf("%s", accumulator[i]);
                 }
             }
-            // Clear the accumulator
+            // Clear the accumulator. We can leave the array full of prior data cos we keep track of ends of things, and use null terminated strings!
             accumulator_index = 0;
-            memset(accumulator, 0, sizeof(accumulator));
 
             first_newline = true;
-        } else if (linelength == 1 && first_newline == true) {
+        } else if (linelength == 1 && first_newline == true) {  // We just passed the first newline seperating the moves and pgn tags
             first_newline = false;
-        } else {
-            // Append `line` to accumulator
-            if (accumulator_index < 32) {
-                strncpy(accumulator[accumulator_index], line, 32768);
+        } else {  // we are in the middle of the record
+            // Append new `line` to accumulator
+            if (accumulator_index < 32) { // Sanity check for if we are exceeding the tag limit. This "should" only happen if we somehow miss a newline, and overflow to the next record
+                memcpy(accumulator[accumulator_index], line, linelength);
+                accumulator[accumulator_index][linelength] = '\0';
                 accumulator_index++;
             } else {
                 printf("Accumulator overflow!\n");
