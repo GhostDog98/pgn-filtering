@@ -3,10 +3,15 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
-static char printf_buffer[160000000]; // size of printf buffer
-#define ACCUMULATOR_ITEMS 32
-#define ACCUMULATOR_ITEM_MAX_LENGTH 32768
+#ifndef WINDOWSIZE
+#error "WINDOWSIZE" is not defined!!!!
+#endif
 
 // Function to extract Elo rating from a line
 int extract_elo(char *line) {
@@ -17,29 +22,10 @@ int extract_elo(char *line) {
     return 0;
 }
 
-// Function to check if both WhiteElo and BlackElo are within the target Elo range
-bool is_within_elo_range(char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MAX_LENGTH], int low_elo, int high_elo) {
-    int white_elo = 0;
-    int black_elo = 0;
-
-    int early_exit = 0;
-
-    for (int i = 0; i < ACCUMULATOR_ITEMS; i++) {  // Iterate over the entire accumulator to see if we have WhiteElo or BlackElo.
-        if (strstr(accumulator[i], "WhiteElo")) {
-            white_elo = extract_elo(accumulator[i]);
-            early_exit++;
-        } else if (strstr(accumulator[i], "BlackElo")) {
-            black_elo = extract_elo(accumulator[i]);
-            early_exit++;
-        }
-
-        if (early_exit >= 2) {  // If we have parsed 2 elo's, we shouldn't ever have more!
-            return (white_elo >= low_elo && white_elo <= high_elo && black_elo >= low_elo && black_elo <= high_elo);
-        }
-    }
-    printf("WARNING: RECORD REACHED END WITHOUT ELO");
-    return false;
-}
+// Zerocopy optimizations
+#define l(x) __builtin_expect(!!(x), 1)
+#define u(x) __builtin_expect(!!(x), 0)
+#define PAGESIZE (0x1000)
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
@@ -50,129 +36,190 @@ int main(int argc, char *argv[]) {
     int low_elo = atoi(argv[1]);
     int high_elo = atoi(argv[2]);
     char *file = argv[3];
+    struct stat stats; 
 
-    char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MAX_LENGTH];  // Array of 32 items (lines), each having 32k items (chars)
-    int accumulator_index = 0;   // Index to keep track of the accumulator
-    unsigned long long records_parsed = 0;
-    FILE *fp;
-    char *line = NULL;
-    size_t len = 0;
-    ssize_t linelength;
+    int fd = open(file, O_RDWR);
+    fstat(fd, &stats);
+    size_t filesize = stats.st_size;
+    
+    char *begin, *end, *headerstart, *datastart, *index; 
+    size_t indexoffset = 0;
+    struct iovec iov[40];
+    size_t iovecoffset = 0;
+    bool print_data = false;
+    bool isheader = true;
+    size_t fileoffset = 0;
 
-    // Set buffer to make printf faster
-    setvbuf(stdout, printf_buffer, _IOFBF, sizeof(printf_buffer));
+    if (filesize < WINDOWSIZE)  // If we can fit the entire file in our "window", we don't need to juggle data around
+        goto done;
 
-    fp = fopen(file, "r");
-    if (fp == NULL) {
-        printf("Error opening file %s...\n", file);
-        exit(EXIT_FAILURE);
-    }
+    for (fileoffset = 0; fileoffset < filesize - WINDOWSIZE; fileoffset += WINDOWSIZE) {
+        if (fileoffset != 0)
+            munmap(begin, WINDOWSIZE);
+        void *addr = mmap(NULL, WINDOWSIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, fileoffset);
+        madvise(addr, WINDOWSIZE, MADV_WILLNEED | MADV_SEQUENTIAL);
+        begin = addr;
+        end = addr + WINDOWSIZE;
+        index = begin + indexoffset;
 
-    bool first_newline = true;
-    while ((linelength = getline(&line, &len, fp)) != -1) {  // Read through entire file
-        if (linelength == 1 && first_newline == false) {  // We are at the end of a record now
-            records_parsed++;
+        if (fileoffset == 0)
+            headerstart = begin;
 
-            // Check if the record is within the target Elo range
-            if (is_within_elo_range(accumulator, low_elo, high_elo)) {
-                printf("\n");  // Only print newline if a match is found, this ensures we have that extra break between pgn data and pgn moves
-
-                // Print accumulator
-                for (int i = 0; i < accumulator_index; i++) {
-                    printf("%s", accumulator[i]);
+        while (index < end) {
+            if (isheader) {
+                headerstart = index;
+                datastart = memmem(index, end - index, "\n\n", 2);
+                if (datastart == NULL) {
+                    indexoffset = (size_t)index - ((size_t)index & (~(PAGESIZE - 1)));
+                    fileoffset += ((size_t)index & (~(PAGESIZE - 1))) - (size_t)begin;
+                    writev(1, iov, iovecoffset);
+                    iovecoffset = 0;
+                    if (fileoffset < filesize - WINDOWSIZE)
+                        goto remap;
+                    else
+                        goto done;
                 }
-            }
-            // Clear the accumulator. We can leave the array full of prior data cos we keep track of ends of things, and use null terminated strings!
-            accumulator_index = 0;
+                char *elo1 = memmem(index, datastart - index, "Elo", 3);
+                index = elo1 + 3; 
+                char *elo2 = memmem(index, datastart - index, "Elo", 3);
+                index = elo1 + 3; 
 
-            first_newline = true;
-        } else if (linelength == 1 && first_newline == true) {  // We just passed the first newline seperating the moves and pgn tags
-            first_newline = false;
-        } else {  // we are in the middle of the record
-            // Append new `line` to accumulator
-            if (accumulator_index < ACCUMULATOR_ITEMS) { // Sanity check for if we are exceeding the tag limit. This "should" only happen if we somehow miss a newline, and overflow to the next record
-                memcpy(accumulator[accumulator_index], line, linelength);
-                accumulator[accumulator_index][linelength] = '\0';
-                accumulator_index++;
+                if (elo1 != NULL && elo2 != NULL) {
+                    int elo1val = extract_elo(elo1);
+                    int elo2val = extract_elo(elo2);
+                    if (elo1val >= low_elo && elo1val <= high_elo && elo2val >= low_elo && elo2val <= high_elo) {
+                        iov[iovecoffset].iov_base = headerstart; 
+                        iov[iovecoffset++].iov_len = (char *)datastart + 2 - headerstart;
+                        if (iovecoffset == 40) {
+                            writev(1, iov, 40);
+                            iovecoffset = 0;
+                        }
+                        print_data = true;
+                    }
+                }
+                datastart += 2; 
+                index = datastart;
+                isheader = false;
+
             } else {
-                printf("Accumulator overflow!\n");
-                break;
+                datastart = index;
+                headerstart = memmem(index, end - index, "\n\n", 2);
+                if (headerstart == NULL) {
+                    indexoffset = (size_t)index - ((size_t)index & (~(PAGESIZE - 1)));
+                    fileoffset += ((size_t)index & (~(PAGESIZE - 1))) - (size_t)begin;
+                    writev(1, iov, iovecoffset);
+                    iovecoffset = 0;
+                    if (fileoffset < filesize - WINDOWSIZE)
+                        goto remap;
+                    else
+                        goto done;
+                }
+
+                while (headerstart < end && *headerstart == '\n')
+                    headerstart++;
+
+                if (print_data) {
+                    iov[iovecoffset].iov_base = datastart; 
+                    iov[iovecoffset++].iov_len = (char *)headerstart + 2 - index;
+                    if (iovecoffset == 40) {
+                        writev(1, iov, 40);
+                        iovecoffset = 0;
+                    }
+                    print_data = false;
+                }
+                headerstart += 2;
+                index = headerstart;
+                isheader = true;
             }
         }
-    }
-    printf("Total records parsed: %llu\n", records_parsed);
-
-    fclose(fp);
-    if (line)  // If we have hit the end
-        free(line);
-    exit(EXIT_SUCCESS);
-}
-/*
-int main(int argc, char *argv[]) {
-    if (argc != 4) {
-        printf("Usage: %s <low_elo> <high_elo> <file_to_filter.pgn>\n", argv[0]);
-        exit(EXIT_FAILURE);
+        writev(1, iov, iovecoffset);
+        iovecoffset = 0;
+        indexoffset = 0;
     }
 
-    int low_elo = atoi(argv[1]);
-    int high_elo = atoi(argv[2]);
-    char *file = argv[3];
+done:
+    if (filesize - fileoffset != 0) {
+        if (fileoffset != 0)
+            munmap(begin, WINDOWSIZE);
+        void *addr = mmap(NULL, (((filesize - fileoffset) >> 12) + 1) << 12, PROT_READ | PROT_WRITE, MAP_SHARED, fd, fileoffset);
+        madvise(addr, (((filesize - fileoffset) >> 12) + 1) << 12, MADV_WILLNEED | MADV_SEQUENTIAL);
+        begin = addr;
+        end = addr + filesize - fileoffset;
+        index = begin + indexoffset;
 
-    char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MAX_LENGTH];  // Array of 32 items (lines), each having 32k items (chars)
-    int accumulator_index = 0;   // Index to keep track of the accumulator
-    unsigned long long records_parsed = 0;
-    FILE *fp;
-    char line[ACCUMULATOR_ITEM_MAX_LENGTH];
-    size_t len = ACCUMULATOR_ITEM_MAX_LENGTH;
-    size_t linelength;
+        if (fileoffset == 0)
+            headerstart = begin;
 
-    // Set buffer to make printf faster
-    char printf_buffer[BUFSIZ];
-    setvbuf(stdout, printf_buffer, _IOFBF, sizeof(printf_buffer));
-
-    fp = fopen(file, "r");
-    if (fp == NULL) {
-        printf("Error opening file %s...\n", file);
-        exit(EXIT_FAILURE);
-    }
-
-    bool first_newline = true;
-    while (fgets(line, len, fp) != NULL) {  // Read through entire file
-        linelength = strlen(line);
-
-        if (linelength == 1 && first_newline == false) {  // We are at the end of a record now
-            records_parsed++;
-
-            // Check if the record is within the target Elo range
-            if (is_within_elo_range(accumulator, low_elo, high_elo)) {
-                printf("\n");  // Only print newline if a match is found, this ensures we have that extra break between pgn data and pgn moves
-
-                // Print accumulator
-                for (int i = 0; i < accumulator_index; i++) {
-                    printf("%s", accumulator[i]);
+        while (index < end) {
+            if (isheader) {
+                datastart = memmem(index, end - index, "\n\n", 2);
+                if (datastart == NULL) {
+                    indexoffset = (size_t)index - ((size_t)index & (~(PAGESIZE - 1)));
+                    fileoffset += ((size_t)index & (~(PAGESIZE - 1))) - (size_t)begin;
+                    writev(1, iov, iovecoffset);
+                    iovecoffset = 0;
+                    break;
                 }
-            }
-            // Clear the accumulator. We can leave the array full of prior data cos we keep track of ends of things, and use null terminated strings!
-            accumulator_index = 0;
+                char *elo1 = memmem(index, datastart - index, "Elo", 3);
+                index = elo1 + 3; 
+                char *elo2 = memmem(index, datastart - index, "Elo", 3);
+                index = elo1 + 3; 
+                if (elo1 != NULL && elo2 != NULL) {
+                    int elo1val = extract_elo(elo1);
+                    int elo2val = extract_elo(elo2);
+                    if (elo1val >= low_elo && elo1val <= high_elo && elo2val >= low_elo && elo2val <= high_elo) {
+                        iov[iovecoffset].iov_base = headerstart; 
+                        iov[iovecoffset++].iov_len = (char *)datastart + 2 - headerstart;
+                        if (iovecoffset == 40) {
+                            writev(1, iov, 40);
+                            iovecoffset = 0;
+                        }
+                        print_data = true;
+                    }
+                }
+                datastart += 2; 
+                index = datastart;
+                isheader = false;
 
-            first_newline = true;
-        } else if (linelength == 1 && first_newline == true) {  // We just passed the first newline separating the moves and pgn tags
-            first_newline = false;
-        } else {  // we are in the middle of the record
-            // Append new `line` to accumulator
-            if (accumulator_index < ACCUMULATOR_ITEMS) { // Sanity check for if we are exceeding the tag limit. This "should" only happen if we somehow miss a newline, and overflow to the next record
-                memcpy(accumulator[accumulator_index], line, linelength);
-                accumulator[accumulator_index][linelength] = '\0';
-                accumulator_index++;
             } else {
-                printf("Accumulator overflow!\n");
-                break;
+                headerstart = memmem(index, end - index, "\n\n", 2);
+                if (headerstart == NULL) {
+                    indexoffset = (size_t)index - ((size_t)index & (~(PAGESIZE - 1)));
+                    fileoffset += ((size_t)index & (~(PAGESIZE - 1))) - (size_t)begin;
+                    writev(1, iov, iovecoffset);
+                    iovecoffset = 0;
+                    break;
+                }
+
+                while (headerstart < end && *headerstart == '\n')
+                    headerstart++;
+
+                if (print_data) {
+                    iov[iovecoffset].iov_base = datastart;
+                    iov[iovecoffset++].iov_len = (char *)headerstart + 2 - index;
+                    if (iovecoffset == 40) {
+                        writev(1, iov, 40);
+                        iovecoffset = 0;
+                    }
+                    print_data = false;
+                }
+                headerstart += 2;
+                index = headerstart;
+                isheader = true;
             }
         }
+        writev(1, iov, iovecoffset);
     }
-    printf("Total records parsed: %llu\n", records_parsed);
 
-    fclose(fp);
     exit(EXIT_SUCCESS);
+
+remap:
+    if (fileoffset != 0)
+        munmap(begin, WINDOWSIZE);
+    void *addr = mmap(NULL, WINDOWSIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, fileoffset);
+    madvise(addr, WINDOWSIZE, MADV_WILLNEED | MADV_SEQUENTIAL);
+    begin = addr;
+    end = addr + WINDOWSIZE;
+    index = begin + indexoffset;
+    goto done;
 }
-*/
