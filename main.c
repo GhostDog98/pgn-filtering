@@ -22,7 +22,7 @@ int extract_elo(char *line) {
     return 0;
 }
 
-// Zerocopy optimizations
+// Zerocopy optimizations, 99% done by KFA
 #define l(x) __builtin_expect(!!(x), 1)
 #define u(x) __builtin_expect(!!(x), 0)
 #define PAGESIZE (0x1000)
