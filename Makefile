@@ -3,7 +3,7 @@
 MEMSIZE = $(shell echo $$((`free -b | awk '/Mem/ {print $$7}'` / 3)))
 CC = gcc
 TARGET = pgn
-CFLAGS = -g3 -Wall -Wextra -DWINDOWSIZE=$(MEMSIZE)
+CFLAGS = -Ofast -g3 -Wall -Wextra -DWINDOWSIZE=$(MEMSIZE)
 LDFLAGS = -lm
 SRCS = main.c
 OBJS = $(SRCS:.c=.o)
