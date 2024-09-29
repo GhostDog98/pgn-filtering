@@ -24,9 +24,28 @@ int extract_elo(char *line) {
 // Function to check if both WhiteElo and BlackElo are within the target Elo range
 bool is_within_elo_range(char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MAX_LENGTH], int low_elo, int high_elo) {
 
+    // We can get the chance of whiteelo being on any given line using:
+        // ./pgn 1 9999 lichess_db_standard_rated_2023-05.pgn | grep "Found white on line" | sed 's/Found white on line //g' > data.txt
+    // Common values are 7 and 9
+    /*
+    int common_lines[] = {7, 9};
+    int common_lines_elements = sizeof(common_lines) / sizeof(common_lines[0]);
+    int i = 0;
+    while (i < common_lines_elements){
+        if(strstr(accumulator[common_lines[i]], "WhiteElo")){
+            int white_elo = extract_elo(accumulator[common_lines[i]]);
+            // We know that the black elo HAS TO BE NEXT, saves a bunch of time
+            int black_elo = extract_elo(accumulator[common_lines[i] + 1]);
+
+            return (white_elo >= low_elo && white_elo <= high_elo && black_elo >= low_elo && black_elo <= high_elo);
+        }
+        i++;
+    }*/
+
+
+
     for (int i = 0; i < ACCUMULATOR_ITEMS; i++){
         if (strstr(accumulator[i], "WhiteElo")){
-            printf("Found white on line %i\n", i);
             int white_elo = extract_elo(accumulator[i]);
             // We know that the black elo HAS TO BE NEXT, saves a bunch of time
             int black_elo = extract_elo(accumulator[i + 1]);
@@ -34,6 +53,9 @@ bool is_within_elo_range(char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MA
             return (white_elo >= low_elo && white_elo <= high_elo && black_elo >= low_elo && black_elo <= high_elo);
         }
     }
+
+
+
     printf("WARNING: RECORD REACHED END WITHOUT ELO");
     exit(EXIT_FAILURE);
     return false;
