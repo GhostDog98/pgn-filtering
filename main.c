@@ -10,6 +10,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+
 static char printf_buffer[160000000]; // size of printf buffer
 #define ACCUMULATOR_ITEMS 40  // Maximum number of tags in a game, plus 3 for the newlines and pgn data
 #define ACCUMULATOR_ITEM_MAX_LENGTH 19202 // Max lichess game length plus worst case pgn notation https://lichess.org/forum/general-chess-discussion/what-is-the-highest-number-of-moves-played-in-a-game-on-lichess
@@ -27,11 +28,10 @@ bool is_within_elo_range(char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MA
     // We can get the chance of whiteelo being on any given line using:
         // ./pgn 1 9999 lichess_db_standard_rated_2023-05.pgn | grep "Found white on line" | sed 's/Found white on line //g' > data.txt
     // Common values are 7 and 9
-    /*
+
     int common_lines[] = {7, 9};
     int common_lines_elements = sizeof(common_lines) / sizeof(common_lines[0]);
-    int i = 0;
-    while (i < common_lines_elements){
+    for (int i = 0; i < common_lines_elements; i++) {
         if(strstr(accumulator[common_lines[i]], "WhiteElo")){
             int white_elo = extract_elo(accumulator[common_lines[i]]);
             // We know that the black elo HAS TO BE NEXT, saves a bunch of time
@@ -39,8 +39,7 @@ bool is_within_elo_range(char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MA
 
             return (white_elo >= low_elo && white_elo <= high_elo && black_elo >= low_elo && black_elo <= high_elo);
         }
-        i++;
-    }*/
+     }
 
 
 
@@ -60,7 +59,6 @@ bool is_within_elo_range(char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MA
     exit(EXIT_FAILURE);
     return false;
 }
-
 
 int main(int argc, char *argv[]) {
     if (__builtin_expect(argc != 4, 0)) { // We expect this to usually pass through...
@@ -97,7 +95,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MAX_LENGTH];  // Array of 32 items (lines), each having 19202 items (chars)
+    __attribute__((aligned(32))) char accumulator[ACCUMULATOR_ITEMS][ACCUMULATOR_ITEM_MAX_LENGTH];  // Array of 32 items (lines), each having 19202 items (chars)
     int accumulator_index = 0;   // Index to keep track of the accumulator
     unsigned long long records_parsed = 0;
 
